@@ -25,6 +25,8 @@
 
 package java.lang.runtime;
 
+import jdk.internal.vm.annotation.Stable;
+
 import java.lang.invoke.CallSite;
 import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandle;
@@ -49,12 +51,27 @@ import static java.util.Objects.requireNonNull;
  */
 public class SwitchBootstraps {
 
+    private enum TypeSwitchStrategy {
+        ARRAY_LOOP,
+        IF_ELSE,
+        MIXED
+    }
+
+    private static final TypeSwitchStrategy TYPE_SWITCH_STRATEGY
+        = TypeSwitchStrategy.valueOf(System.getProperty("java.lang.runtime.SwitchBootstraps.TYPE_SWITCH_STRATEGY", "MIXED"));
+
     private SwitchBootstraps() {}
 
     // Shared INIT_HOOK for all switch call sites; looks the target method up in a map
     private static final MethodHandle TYPE_INIT_HOOK;
     private static final MethodHandle TYPE_SWITCH_METHOD;
 
+    private static final MethodHandle MH_CASEACTION;
+    private static final MethodHandle MH_CASECHECK;
+    private static final MethodHandle MH_NULLCASE
+        = MethodHandles.dropArguments(MethodHandles.constant(int.class, -1), 0, Object.class, int.class);
+    private static final MethodHandle MH_NULLCHECK;
+    private static final MethodHandle MH_Object_getClass;
 
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
 
@@ -64,6 +81,14 @@ public class SwitchBootstraps {
                                                   MethodType.methodType(MethodHandle.class, CallSite.class));
             TYPE_SWITCH_METHOD = LOOKUP.findVirtual(TypeSwitchCallSite.class, "doSwitch",
                                                     MethodType.methodType(int.class, Object.class, int.class));
+
+            MH_CASEACTION = LOOKUP.findStatic(SwitchBootstraps.class, "caseAction",
+                    MethodType.methodType(int.class, Class.class, int.class, int.class));
+            MH_CASECHECK = LOOKUP.findStatic(SwitchBootstraps.class, "caseCheck",
+                    MethodType.methodType(boolean.class, Class.class, int.class, Class.class, int.class));
+            MH_NULLCHECK = LOOKUP.findStatic(SwitchBootstraps.class, "nullCheck",
+                    MethodType.methodType(boolean.class, Object.class, int.class));
+            MH_Object_getClass = LOOKUP.findVirtual(Object.class, "getClass", MethodType.methodType(Class.class));
         }
         catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
@@ -71,7 +96,7 @@ public class SwitchBootstraps {
     }
 
     private static<T extends CallSite> MethodHandle typeInitHook(T receiver) {
-        return TYPE_SWITCH_METHOD.bindTo(receiver);
+        return TYPE_SWITCH_METHOD.bindTo(receiver).asType(receiver.type());
     }
 
     /**
@@ -108,7 +133,8 @@ public class SwitchBootstraps {
                                       Class<?>... types) throws Throwable {
         if (invocationType.parameterCount() != 2
             || (!invocationType.returnType().equals(int.class))
-            || invocationType.parameterType(0).isPrimitive())
+            || invocationType.parameterType(0).isPrimitive()
+            || (!invocationType.parameterType(1).equals(int.class)))
             throw new IllegalArgumentException("Illegal invocation type " + invocationType);
         requireNonNull(types);
 
@@ -119,10 +145,51 @@ public class SwitchBootstraps {
         assert Stream.of(types).distinct().count() == types.length
                 : "switch labels are not distinct: " + Arrays.toString(types);
 
-        return new TypeSwitchCallSite(invocationType, types);
+        return switch (TYPE_SWITCH_STRATEGY) {
+            case MIXED, ARRAY_LOOP -> new TypeSwitchCallSite(invocationType, types);
+            case IF_ELSE -> new ConstantCallSite(generateIfElse(types).asType(invocationType));
+        };
+    }
+
+    private static int caseAction(Class<?> testType, int startIndex, int caseIndex) {
+        return caseIndex;
+    }
+
+    private static boolean caseCheck(Class<?> testType, int startIndex, Class<?> caseType, int caseIndex) {
+        return !(startIndex > caseIndex) && testType == caseType;
+    }
+
+    private static boolean nullCheck(Object testObject, int startIndex) {
+        return Objects.isNull(testObject);
+    }
+
+    private static MethodHandle guardWithNullCheck(MethodHandle handle) {
+        return MethodHandles.guardWithTest(MH_NULLCHECK, MH_NULLCASE, handle);
+    }
+
+    private static MethodHandle generateIfElse(Class<?>[] types) {
+        // (Class, int) -> int
+        MethodHandle handle = MethodHandles.insertArguments(MH_CASEACTION, 2, types.length); // default
+
+        for (int i = types.length - 1; i >= 0; i--) {
+            Class<?> caseType = types[i];
+            // (Class, int) -> int
+            MethodHandle caseAction = MethodHandles.insertArguments(MH_CASEACTION, 2, i);
+            // (Class, int) -> boolean
+            MethodHandle caseCheck = MethodHandles.insertArguments(MH_CASECHECK, 2, caseType, i);
+            // (Class, int) -> int
+            handle = MethodHandles.guardWithTest(caseCheck, caseAction, handle);
+        }
+
+        // (Object, int) -> int
+        handle = MethodHandles.filterArguments(handle, 0, MH_Object_getClass);
+        handle = guardWithNullCheck(handle);
+
+        return handle;
     }
 
     static class TypeSwitchCallSite extends ConstantCallSite {
+        @Stable
         private final Class<?>[] types;
 
         TypeSwitchCallSite(MethodType targetType,
