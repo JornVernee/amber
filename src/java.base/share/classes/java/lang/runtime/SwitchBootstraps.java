@@ -32,8 +32,10 @@ import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
@@ -67,9 +69,11 @@ public class SwitchBootstraps {
     private static final MethodHandle TYPE_SWITCH_METHOD;
 
     private static final MethodHandle MH_CASEACTION;
-    private static final MethodHandle MH_CASECHECK;
-    private static final MethodHandle MH_NULLCASE
-        = MethodHandles.dropArguments(MethodHandles.constant(int.class, -1), 0, Object.class, int.class);
+    private static final MethodHandle MH_INDEXCHECK;
+    private static final MethodHandle MH_TYPECHECK;
+    private static final MethodHandle MH_TYPECHECKFINAL;
+    private static final MethodHandle MH_AND;
+    private static final MethodHandle MH_NULLCASE;
     private static final MethodHandle MH_NULLCHECK;
     private static final MethodHandle MH_Object_getClass;
 
@@ -84,8 +88,16 @@ public class SwitchBootstraps {
 
             MH_CASEACTION = LOOKUP.findStatic(SwitchBootstraps.class, "caseAction",
                     MethodType.methodType(int.class, Class.class, int.class, int.class));
-            MH_CASECHECK = LOOKUP.findStatic(SwitchBootstraps.class, "caseCheck",
-                    MethodType.methodType(boolean.class, Class.class, int.class, Class.class, int.class));
+            MH_INDEXCHECK = LOOKUP.findStatic(SwitchBootstraps.class, "indexCheck",
+                    MethodType.methodType(boolean.class, int.class, int.class));
+            MH_TYPECHECK = LOOKUP.findStatic(SwitchBootstraps.class, "typeCheck",
+                    MethodType.methodType(boolean.class, Class.class, Class.class));
+            MH_TYPECHECKFINAL = LOOKUP.findStatic(SwitchBootstraps.class, "typeCheckFinal",
+                    MethodType.methodType(boolean.class, Class.class, Class.class));
+            MH_AND = LOOKUP.findStatic(SwitchBootstraps.class, "and",
+                    MethodType.methodType(boolean.class, boolean.class, boolean.class));
+            MH_NULLCASE = LOOKUP.findStatic(SwitchBootstraps.class, "nullCase",
+                    MethodType.methodType(int.class, Object.class, int.class));
             MH_NULLCHECK = LOOKUP.findStatic(SwitchBootstraps.class, "nullCheck",
                     MethodType.methodType(boolean.class, Object.class, int.class));
             MH_Object_getClass = LOOKUP.findVirtual(Object.class, "getClass", MethodType.methodType(Class.class));
@@ -151,16 +163,40 @@ public class SwitchBootstraps {
         };
     }
 
+    private static boolean areDisjoint(Class<?>[] types) {
+        return Arrays.stream(types)
+                .collect(Collectors.groupingBy(i -> i, Collectors.counting()))
+                .values()
+                .stream()
+                .allMatch(count -> count == 1);
+    }
+
     private static int caseAction(Class<?> testType, int startIndex, int caseIndex) {
         return caseIndex;
     }
 
-    private static boolean caseCheck(Class<?> testType, int startIndex, Class<?> caseType, int caseIndex) {
-        return !(startIndex > caseIndex) && testType == caseType;
+    private static boolean indexCheck(int startIndex, int caseIndex) {
+       return !(startIndex > caseIndex);
+    }
+
+    private static boolean typeCheck(Class<?> testType, Class<?> caseType) {
+        return caseType.isAssignableFrom(testType);
+    }
+
+    private static boolean typeCheckFinal(Class<?> testType, Class<?> caseType) {
+        return caseType == testType;
+    }
+
+    private static boolean and(boolean a, boolean b) {
+        return a && b;
     }
 
     private static boolean nullCheck(Object testObject, int startIndex) {
         return Objects.isNull(testObject);
+    }
+
+    private static int nullCase(Object testObject, int startIndex) {
+        return -1;
     }
 
     private static MethodHandle guardWithNullCheck(MethodHandle handle) {
@@ -168,21 +204,37 @@ public class SwitchBootstraps {
     }
 
     private static MethodHandle generateIfElse(Class<?>[] types) {
+        boolean disjoint = areDisjoint(types);
+
         // (Class, int) -> int
         MethodHandle handle = MethodHandles.insertArguments(MH_CASEACTION, 2, types.length); // default
 
         for (int i = types.length - 1; i >= 0; i--) {
             Class<?> caseType = types[i];
+            boolean isFinal = Modifier.isFinal(caseType.getModifiers());
+
+            MethodHandle caseCheck;
+            // (Class) -> boolean
+            MethodHandle typeCheck = MethodHandles.insertArguments(isFinal ? MH_TYPECHECKFINAL : MH_TYPECHECK, 1, caseType);
+            if (disjoint) {
+                // (Class, int) -> boolean
+                caseCheck = MethodHandles.dropArguments(typeCheck, 1, int.class);
+            } else {
+                // (int) -> boolean
+                MethodHandle indexCheck = MethodHandles.insertArguments(MH_INDEXCHECK, 1, i);
+                // (Class, int) -> boolean
+                caseCheck = MethodHandles.filterArguments(MH_AND, 0, typeCheck, indexCheck);
+            }
+
             // (Class, int) -> int
             MethodHandle caseAction = MethodHandles.insertArguments(MH_CASEACTION, 2, i);
-            // (Class, int) -> boolean
-            MethodHandle caseCheck = MethodHandles.insertArguments(MH_CASECHECK, 2, caseType, i);
             // (Class, int) -> int
             handle = MethodHandles.guardWithTest(caseCheck, caseAction, handle);
         }
 
         // (Object, int) -> int
         handle = MethodHandles.filterArguments(handle, 0, MH_Object_getClass);
+        // (Object, int) -> int
         handle = guardWithNullCheck(handle);
 
         return handle;

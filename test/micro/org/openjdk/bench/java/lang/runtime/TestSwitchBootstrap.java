@@ -71,7 +71,7 @@ public class TestSwitchBootstrap {
     @Param({ "5", "10", "25", "50", "100" })
     public int numCases;
 
-    public List<Types.I> inputs;
+    public Types.I[] inputs;
 
     @Setup(Level.Trial)
     public void setupTrial() throws Throwable {
@@ -81,34 +81,34 @@ public class TestSwitchBootstrap {
 
         baselineCs.setTarget(MethodHandles.dropArguments(MethodHandles.constant(int.class, -1), 0, Types.I.class, int.class));
 
-        inputs = new ArrayList<>();
+        inputs = new Types.I[BATCH_SIZE];
         Random rand = new Random(0);
         for (int i = 0; i < BATCH_SIZE; i++) {
-            inputs.add(Types.ALL_TYPES_INST.get(rand.nextInt(Types.ALL_TYPES.size())));
+            inputs[i] = Types.ALL_TYPES_INST.get(rand.nextInt(Types.ALL_TYPES.size()));
         }
     }
 
     @Benchmark
     @Fork(value = 1)
     public void testSwitch_baseline(Blackhole bh) throws Throwable {
-        for (int i = 0; i < inputs.size(); i++) {
-            bh.consume((int) baselinetarget.invokeExact(inputs.get(i), 0));
+        for (int i = 0; i < inputs.length; i++) {
+            bh.consume((int) baselinetarget.invokeExact(inputs[i], 0));
         }
     }
 
     @Benchmark
     @Fork(value = 3, jvmArgsAppend = { "-Djava.lang.runtime.SwitchBootstraps.TYPE_SWITCH_STRATEGY=ARRAY_LOOP" })
     public void testSwitch_arrayLoop(Blackhole bh) throws Throwable {
-        for (int i = 0; i < inputs.size(); i++) {
-            bh.consume((int) target.invokeExact(inputs.get(i), 0));
+        for (int i = 0; i < inputs.length; i++) {
+            bh.consume((int) target.invokeExact(inputs[i], 0));
         }
     }
 
     @Benchmark
     @Fork(value = 3, jvmArgsAppend = { "-Djava.lang.runtime.SwitchBootstraps.TYPE_SWITCH_STRATEGY=IF_ELSE" })
     public void testSwitch_ifElse(Blackhole bh) throws Throwable {
-        for (int i = 0; i < inputs.size(); i++) {
-            bh.consume((int) target.invokeExact(inputs.get(i), 0));
+        for (int i = 0; i < inputs.length; i++) {
+            bh.consume((int) target.invokeExact(inputs[i], 0));
         }
     }
 
